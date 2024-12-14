@@ -6,6 +6,12 @@
 typedef void (APIENTRY* PFNGLAPPLYFRAMEBUFFERATTACHMENTCMAAINTELPROC) (void);
 PFNGLAPPLYFRAMEBUFFERATTACHMENTCMAAINTELPROC glApplyFramebufferAttachmentCMAAINTEL = NULL;
 
+static constexpr bool useOffscreen = true;
+static constexpr bool use16BitFbo = true;
+
+static GLint targetWidth = 800;
+static GLint targetHeight = 600;
+
 const char* vertexShaderSource = R"(
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -86,8 +92,48 @@ GLuint loadTexture() {
     return texture;
 }
 
+GLuint createColorAttachment() {
+	GLuint texture;
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glTexStorage2D(GL_TEXTURE_2D, 1, use16BitFbo ? GL_RGBA16 : GL_RGBA8, 800, 600);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 1.0f);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return texture;
+}
+
+GLuint createOffscreenFramebuffer(GLuint colorAttachment) {
+	GLuint FBO;
+	glGenFramebuffers(1, &FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER_EXT, FBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, colorAttachment, 0);
+	if ( glCheckFramebufferStatus(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT )
+		std::cerr << "Failed to validate offscreen framebuffer" << std::endl;
+	glBindFramebuffer(GL_FRAMEBUFFER_EXT, 0);
+	return FBO;
+}
+
 void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
+	targetWidth = width;
+	targetHeight = height;
     glViewport(0, 0, width, height);
+}
+
+static void APIENTRY debugCallback
+(
+	GLenum source,
+	GLenum type,
+	GLuint id,
+	GLenum severity,
+	GLsizei length,
+	const GLchar* message,
+	const void* userParam
+) {
+	std::cerr << message << std::endl;
 }
 
 int main() {
@@ -99,6 +145,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3); 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3); 
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+	glfwWindowHint(GLFW_CONTEXT_DEBUG, 1);
 
     GLFWwindow* window = glfwCreateWindow(800, 600, "CMAA Demonstration", nullptr, nullptr);
     if (!window) {
@@ -114,6 +161,11 @@ int main() {
         std::cerr << "Failed to initialize GLEW" << std::endl;
         return -1;
     }
+
+	if ( glDebugMessageCallback ) {
+		glEnable(GL_DEBUG_OUTPUT);
+		glDebugMessageCallback(&debugCallback, nullptr);
+	}
 
     // Check for the Intel extension 
     if (glewIsSupported("GL_INTEL_framebuffer_CMAA"))
@@ -153,9 +205,13 @@ int main() {
 
     GLuint texture = loadTexture();
 
-    while (!glfwWindowShouldClose(window)) {
+	GLuint colorAttachment = createColorAttachment();
+	GLuint FBO = createOffscreenFramebuffer(colorAttachment);
 
-    
+    while (!glfwWindowShouldClose(window)) {
+		if ( useOffscreen ) {
+			glBindFramebuffer(GL_FRAMEBUFFER, FBO);
+		}
 
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -164,13 +220,22 @@ int main() {
         glBindVertexArray(VAO);
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glApplyFramebufferAttachmentCMAAINTEL();
+		glApplyFramebufferAttachmentCMAAINTEL();
+
+		if ( useOffscreen ) {
+			glBindFramebuffer(GL_READ_FRAMEBUFFER_EXT, FBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, 0);
+			glBlitFramebuffer(0, 0, targetWidth, targetHeight, 0, 0, targetWidth, targetHeight, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		}
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
+    glDeleteFramebuffers(1, &FBO);
+    glDeleteTextures(1, &colorAttachment);
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
     glDeleteProgram(shaderProgram);
